@@ -47,6 +47,10 @@ TS_PATS = [
     (re.compile(r'^\s*(?:export\s+)?(?:declare\s+)?(interface|type|enum)\s+(\w+)'), 'type'),
     (re.compile(r'^\s*(?:export\s+)?const\s+(\w+)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|\w+)\s*(?::[^=]+)?=>'), 'fn'),
     (re.compile(r'^\s*export\s+const\s+(\w+)'), 'const'),
+    (re.compile(r'^(?:const|let)\s+([A-Z][A-Z0-9_]+)\b'), 'const'),  # top-level UPPER_CASE constant
+    # express/CommonJS style: req.header = function header() / Foo.prototype.bar = async () =>
+    (re.compile(r'^\s*(?:[\w$]+\.)+([\w$]+)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[\w$]+\s*=>)'), 'fn'),
+    (re.compile(r'''^\s*(?:Object\.)?define\w*\(\s*[\w.$]+\s*,\s*['"]([\w$]+)['"]'''), 'getter'),  # defineGetter(req, 'xhr', ...)
     (re.compile(r'^\s+(?:public\s+|private\s+|protected\s+|static\s+|async\s+|readonly\s+)*(\w+)\s*(?:<[^>]*>)?\([^)]*\)\s*(?::\s*[^{;]+)?\{'), 'method'),
 ]
 SOL_PAT = re.compile(r'^\s*(contract|interface|library|abstract contract|function|event|modifier|struct|enum|error)\s+(\w+)')
@@ -131,12 +135,17 @@ def parse_py(text):
             imps += [a.name for a in n.names]
         elif isinstance(n, ast.ImportFrom):
             imps.append('.' * n.level + (n.module or ''))
+    for n in tree.body:  # module constants: USER_AGENT = ..., SUPPORTED_DECODERS = {...}
+        tgt = n.targets if isinstance(n, ast.Assign) else [n.target] if isinstance(n, ast.AnnAssign) else []
+        for t in tgt:
+            if isinstance(t, ast.Name) and not t.id.startswith('__'):
+                syms.append((t.id, 'const', n.lineno, n.end_lineno or n.lineno, lines[n.lineno - 1].strip()[:100], ''))
     return syms, imps, ast.get_docstring(tree) or ''
 
 
 # ---------- index ----------
 CHUNK, CHUNK_STEP = 30, 20  # overlapping windows so a phrase on a boundary still lands in one chunk
-VERSION = 8  # bump when parsing or schema changes: forces a clean rebuild
+VERSION = 12  # bump when parsing or schema changes: forces a clean rebuild
 
 
 def _wipe(path):
@@ -334,7 +343,7 @@ def resolve(f, spec, pset, suffix):
 
 # ---------- queries ----------
 # weights tuned on 47 benchmark questions; CMP env overrides for tuning
-P = {'bw': 1.0, 'covp': 2.0, 'sf': 0.6, 'cf': 1.0, 'md': 0.6, 'mw': 2.0, 'legacy': 0.4, 'qlit': 1.5, **json.loads(os.environ.get('CMP') or '{}')}
+P = {'bw': 1.0, 'covp': 2.0, 'sf': 0.6, 'cf': 1.0, 'md': 0.6, 'mw': 2.0, 'legacy': 0.4, 'qlit': 1.5, 'testw': 0.4, 'join': 2, 'files': 8, 'fns': 4, 'cs': 0.5, **json.loads(os.environ.get('CMP') or '{}')}
 # irregular verbs the porter stemmer cannot join: a question says "saw", the code says "seen"
 IRREG = {}
 for g in ('see saw seen', 'show showed shown', 'send sent', 'make made', 'run ran', 'hold held', 'build built',
@@ -352,6 +361,13 @@ def ask(root, db, query, out):
     for t in idents:  # case/underscore-insensitive: fetch_user == fetchUser
         for r in db.execute("SELECT id,file,name,kind,s,e,sig FROM syms WHERE lower(replace(name,'_',''))=? LIMIT 10", (t.lower().replace('_', ''),)):
             exact.append(r)
+    joined = []  # "kill switch" -> KillSwitch, "user agent" -> USER_AGENT: a boost in ranking, not a fact
+    raw, kinds = words(query), set(words(query)) & {'class', 'interface', 'type', 'const'}
+    for n in (3, 2):
+        for i in range(len(raw) - n + 1):
+            if not any(x in STOP for x in raw[i:i + n]):
+                for r in db.execute("SELECT id,file,kind FROM syms WHERE kind!='chunk' AND lower(replace(name,'_',''))=? LIMIT 10", (''.join(raw[i:i + n]),)):
+                    joined.append((r[1], r[0], set(raw[i:i + n]), (r[2] in kinds) + 1))
     named = []
     for fn in re.findall(r'[\w./-]+\.(?:tsx?|jsx?|mjs|cjs|sol|py|sql|md|ps1|sh|ya?ml|toml)\b', query):
         named += [r[0] for r in db.execute('SELECT path FROM files WHERE path=? OR path LIKE ? LIMIT 3', (fn, '%/' + fn))]
@@ -394,6 +410,10 @@ def ask(root, db, query, out):
             chunk_rows.add(k)
     for k in chunk_rows:  # many task words inside one 30-line window is the strong signal, not one rare word
         rows_sc[k] *= P['bw'] * (len(rows_w[k]) / len(uw)) ** P['covp']
+    for fid, sid, ws, mult in joined:  # the words, written together, are a symbol's whole name
+        k = (fid, sid)
+        rows_sc[k] = rows_sc.get(k, 0) + P['join'] * mult * len(ws)
+        rows_w.setdefault(k, set()).update(ws)
     bestsym, bestchunk = {}, {}
     for (fid, sid), sc in rows_sc.items():
         if sid:
@@ -414,7 +434,7 @@ def ask(root, db, query, out):
         cover.setdefault(f, set())
     for f, sc in fscore.items():
         if TEST.search(f) and not want_tests:
-            sc *= 0.6
+            sc *= P['testw']
         if f.endswith('.md') and not f.startswith(('.claude/agents/', '.claude/commands/')):  # docs restate code; agent files are the thing
             sc *= P['md']
         if OLD.search(f) and not want_old:  # superseded copies of the code: same words, wrong place
@@ -431,65 +451,31 @@ def ask(root, db, query, out):
             print(f'DBG {sc:6.1f} file={rows_sc.get((f, 0), 0):5.1f} best={bs[0]:5.1f} cov={sorted(cover[f])} {f}', file=sys.stderr)
     rank_of = {f: i for i, (_, f) in enumerate(ranked)}
     exact_files = list(dict.fromkeys(named + [r[1] for r in exact] + sorted(lit, key=lambda f: rank_of.get(f, 1e9))))
-    top = ranked[0][0] if ranked else 0
     listing = re.search(r'\b(list|every|all)\b.*\bfiles?\b|\bwhich files\b', query, re.I)
-    order = exact_files + [f for sc, f in ranked if sc >= (0.3 if listing else 0.55) * top and f not in exact_files]
-    order = order[:10 if listing else 5]
-    out.append('EDIT')
-    keep = []
-    for i, f in enumerate(order):
-        rows = [r for r in exact if r[1] == f]
-        if not rows and f in lit:  # the literal's own line beats any guess
-            ln, txt = lit[f]
-            rows = [(0, f, '', 'lit', ln, ln, txt)]
-        ids = {r[0] for r in rows}
-        need = max(0, (2 if i == 0 else 1 if i < 5 else 0) - len(rows))
-        for _, k in sorted(((sc, sid) for (fid, sid), sc in rows_sc.items() if fid == f and sid and sid not in ids), reverse=True)[:need]:
-            rows.append(db.execute('SELECT id,file,name,kind,s,e,sig FROM syms WHERE id=?', (k,)).fetchone())
-        if not rows:
-            out.append(f'  {f} ' + ('(named in query)' if f in named else '(listed)' if i >= 5 else '(doc/path match)'))
-            continue
-        for r in rows:
-            keep.append((0, r))
-            out.append(f'  {r[1]}:{r[4]}-{r[5]} {r[6]}')
-        if i == 0 and exact and rows[0][5] - rows[0][4] < 12:
-            body = open(os.path.join(root, f), encoding='utf-8', errors='replace').read().split('\n')[rows[0][4]:rows[0][5]]
-            out += ['    | ' + b for b in body]
-    more = [f for f in exact_files if f in lit and f not in order]
-    if more:  # every verbatim hit is a fact: list them all, they are cheap
-        out.append('ALSO CONTAINS THE LITERAL'); out += [f'  {f}:{lit[f][0]}' for f in more]
-    files = order[:3]
-    if files:
-        q = ','.join('?' * len(files))
-        callers = db.execute(f'SELECT src,COUNT(*) c FROM edges WHERE dst IN ({q}) GROUP BY src ORDER BY c DESC', files).fetchall()
-        src = [c[0] for c in callers if not TEST.search(c[0]) and c[0] not in files][:3]
-        tests = [c[0] for c in callers if TEST.search(c[0])][:3]
-        for p in files:  # name-matched tests
-            stem_ = os.path.splitext(os.path.basename(p))[0]
-            for (t,) in db.execute('SELECT path FROM files WHERE path LIKE ? LIMIT 3', (f'%{stem_}.%',)):
-                if TEST.search(t) and t not in tests:
-                    tests.append(t)
-        if src:
-            out.append('CALLERS'); out += [f'  {p}' for p in src]
-        if tests:
-            out.append('TESTS'); out += [f'  {p}' for p in tests[:3]]
-        run = run_cmd(root, files[0])
-        if run:
-            out.append('RUN'); out.append('  ' + run)
-    # 47 benchmark q: wrong answers reached ratio 1.23, so high needs 1.3. Literal/exact/named hits are facts
-    covered = ranked and uw and len(cover[ranked[0][1]]) >= math.ceil(0.6 * len(uw))
-    if exact or named or lit or (covered and (len(ranked) < 2 or ranked[0][0] >= 1.3 * ranked[1][0])):
-        conf = 'high'
-    else:
-        conf = 'medium' if covered else 'low'
-    approx = any(r[1].endswith(('.ts', '.tsx', '.js', '.jsx', '.sol', '.mjs')) for _, r in keep)
-    if conf == 'low':
-        out.append('confidence: low, fall back to grep: ' + ' '.join(dict.fromkeys(qw))[:80])
-    elif conf == 'medium':
-        out.append('confidence: medium, answer is likely one of the EDIT files; check them in order before grepping')
-    else:
-        out.append('confidence: high' + (' (approx ranges)' if approx else ''))
-
+    # 110 benchmark q: top 8 files with their best functions; the agent picks by meaning (right fn listed 91%)
+    files = (exact_files + [f for _, f in ranked if f not in exact_files])[:12 if listing else P['files']]
+    out.append('FILES (best first): pick the function whose name fits and read only its lines; none fits: file <path>')
+    for f in files:
+        syms = db.execute("SELECT id,name,kind,s,e FROM syms WHERE file=? AND kind!='chunk'", (f,)).fetchall()
+        byid = {x[0]: x for x in syms}
+        leaf = [x for x in syms if not any(y[3] >= x[3] and y[4] <= x[4] and (y[3], y[4]) != (x[3], x[4]) for y in syms)]
+        sc = {}
+        for (fid, sid), v in rows_sc.items():
+            if fid != f or not sid:
+                continue
+            if sid in byid:  # matched by name/doc
+                sc[sid] = sc.get(sid, 0) + v
+            else:  # a 30-line body chunk: credit the innermost functions it overlaps
+                ch = db.execute('SELECT s,e FROM syms WHERE id=?', (sid,)).fetchone()
+                for x in leaf:
+                    if x[3] <= ch[1] and ch[0] <= x[4]:
+                        sc[x[0]] = sc.get(x[0], 0) + P['cs'] * v
+        for r in exact:
+            if r[1] == f:
+                sc[r[0]] = sc.get(r[0], 0) + 100
+        items = [f'line {lit[f][0]}'] if f in lit else []
+        items += [f'{byid[k][1]} {byid[k][3]}-{byid[k][4]}' for _, k in sorted(((v, k) for k, v in sc.items()), reverse=True)[:P['fns']]]
+        out.append(f'  {f}  ' + ' · '.join(items))
 
 def scopes_of(db, query):
     """A path in the question that is a real folder (`web/src`) limits the answer to it; it is not text to find."""
@@ -544,10 +530,22 @@ def run_cmd(root, f):
 
 
 def impact(root, db, target, out):
-    row = db.execute('SELECT file FROM syms WHERE name=? LIMIT 1', (target,)).fetchone()
-    f = target if db.execute('SELECT 1 FROM files WHERE path=?', (target,)).fetchone() else (row[0] if row else None)
+    # accepts "path", "symbol", "symbol in path", "path symbol", "Name interface"
+    toks = target.split()
+    f = next((t for t in toks if db.execute('SELECT 1 FROM files WHERE path=?', (t,)).fetchone()), None)
+    sym = next((t for t in toks if t != f and re.fullmatch(r'[A-Za-z_$][\w$]*', t) and t not in STOP
+                and t not in ('interface', 'class', 'type', 'function', 'const', 'method')), None)
+    if sym and not f:  # several definitions can share a name: take the one other files import most
+        cands = [r[0] for r in db.execute("SELECT DISTINCT file FROM syms WHERE name=? AND kind!='chunk'", (sym,))]
+        f = max(cands, key=lambda c: (not TEST.search(c), db.execute('SELECT COUNT(*) FROM edges WHERE dst=?', (c,)).fetchone()[0]), default=None)
     if not f:
         out.append('not found: ' + target); return
+
+    def uses(p):  # importer that names the symbol, not just the file
+        try:
+            return sym in open(os.path.join(root, p), encoding='utf-8', errors='replace').read()
+        except OSError:
+            return False
     lvl, seen, tests = [f], {f}, []
     for depth in (1, 2):
         nxt = []
@@ -555,6 +553,7 @@ def impact(root, db, target, out):
             for (s,) in db.execute('SELECT src FROM edges WHERE dst=?', (p,)):
                 if s not in seen:
                     seen.add(s); nxt.append(s)
+        nxt.sort(key=lambda p: (bool(sym) and depth == 1 and not uses(p), bool(TEST.search(p)), p))  # real users, source before tests
         out.append(f'DEPTH{depth} ({len(nxt)})')
         out += [f'  {p}' for p in nxt[:15]] + ([f'  ... +{len(nxt) - 15}'] if len(nxt) > 15 else [])
         tests += [p for p in nxt if TEST.search(p)]
@@ -572,9 +571,10 @@ def outline(root, db, path, out):
 
 
 SNIPPET = """## codemap
-Before grepping a task, run: python "{path}" ask "<task or identifier>"
-Also: impact <file|symbol> (blast radius + tests), file <path> (outline instead of reading a big file).
-Paths are relative to the repo root. Confidence: high = trust it; medium = check the EDIT files in order; low = grep.
+Before grepping a task, run: python "{path}" ask "<task in plain words> <4-8 words the code likely uses>"
+e.g. ask "where are passwords hidden in logs mask redact obfuscate sensitive secret"
+It lists the best files with their best functions (name start-end). Read only the function that fits.
+None fits: file <path> (outline) instead of reading the whole file. Also: impact <file|symbol> (importers + tests).
 """
 
 
@@ -608,7 +608,7 @@ def main():
                 n = db.execute('SELECT COUNT(*) FROM files').fetchone()[0]
                 out.append(f'codemap: {n} files indexed. ' if n else 'codemap: index builds on first use. ')
                 me = os.path.abspath(__file__).replace(os.sep, '/')
-                out[0] += f'Before grepping a task run: python "{me}" ask "<task>" (also: impact <file|symbol>, file <path>). Trust high; medium = check listed files in order; low = grep.'
+                out[0] += f'Before grepping a task run: python "{me}" ask "<task> <4-8 words the code likely uses>" (also: impact <file|symbol>, file <path>). Read only the listed function that fits; none fits: file <path>, not the whole file.'
             else:
                 refresh(root, db)
                 {'ask': ask, 'impact': impact}.get(a.cmd, outline)(root, db, q.replace(os.sep, '/') if a.cmd == 'file' else q, out)

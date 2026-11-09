@@ -23,10 +23,9 @@ with tempfile.TemporaryDirectory() as d:
         open(os.path.join(d, p), 'w', encoding='utf-8').write(t)
     subprocess.run(['git', 'init', '-q'], cwd=d); subprocess.run(['git', 'add', '-A'], cwd=d)
     o = run(d, 'ask', 'where do we verify the login token')
-    assert 'src/auth/token.ts:2-4' in o, o
-    assert 'src/api/login.ts' in o.split('CALLERS')[1], o          # import edge resolved
-    assert 'token.test.ts' in o.split('TESTS')[1], o                # test linked
-    assert 'npm test' in o and 'confidence: high' in o, o
+    assert o.splitlines()[1].startswith('  src/auth/token.ts  verifyAuthToken 2-4'), o
+    o = run(d, 'impact', 'src/auth/token.ts')
+    assert 'src/api/login.ts' in o and 'token.test.ts' in o, o      # import edge resolved, test linked
     assert 'leakedSecret' not in run(d, 'ask', 'leakedSecret'), 'secrets must not be indexed'
     assert 'src/auth/token.ts' in run(d, 'ask', 'verify_auth_token'), 'underscore identifier'
     assert 'src/billing/tax.py' in run(d, 'ask', 'where is tax added')  # python ast
@@ -35,7 +34,7 @@ with tempfile.TemporaryDirectory() as d:
     assert run(d, 'ask', 'fix login.ts').splitlines()[1].strip().startswith('src/api/login.ts'), 'named file first'
     assert 'src/price.ts' in run(d, 'ask', 'fetch the SOL price'), '"sol" is a word, not only an extension'
     o = run(d, 'ask', 'append svg circle')
-    assert 'src/graph/View.tsx:1-' in o, o  # body text indexed
+    assert 'src/graph/View.tsx  draw 1-7' in o, o  # body text indexed
     assert '1-7 fn draw' in run(d, 'file', 'src/graph/View.tsx')  # multi-line params range
     assert 'src/price.ts' in run(d, 'ask', 'see "getSolPrice()" in price.ts').split('\n')[1]  # literal + named file
     assert 'no searchable words' in run(d, 'ask', 'the a of')
