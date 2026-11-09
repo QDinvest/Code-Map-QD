@@ -1,0 +1,7 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/codemap.py\" hook 2>/dev/null || python \"${CLAUDE_PLUGIN_ROOT}/scripts/codemap.py\" hook" } ] }
+    ]
+  }
+}

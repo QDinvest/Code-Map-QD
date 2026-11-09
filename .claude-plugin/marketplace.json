@@ -1,0 +1,14 @@
+{
+  "name": "codemap",
+  "description": "codemap: a one-call code map for coding agents.",
+  "owner": {
+    "name": "QDinvest"
+  },
+  "plugins": [
+    {
+      "name": "codemap",
+      "source": "./",
+      "description": "Find where code lives in one call: the file to edit with line ranges, its callers, its tests, and how far to trust the answer."
+    }
+  ]
+}
