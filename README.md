@@ -16,13 +16,13 @@
 **Claude Code plugin** (recommended). Run this inside Claude Code:
 
 ```
-/plugin install codemap --marketplace QDinvest/codemap
+/plugin install codemap --marketplace QDinvest/Code-Map-QD
 ```
 
 On Claude Code older than 2.1.275, use two steps instead:
 
 ```
-/plugin marketplace add QDinvest/codemap
+/plugin marketplace add QDinvest/Code-Map-QD
 /plugin install codemap@codemap
 ```
 
@@ -31,7 +31,7 @@ Restart Claude Code. Every session now starts with a one-line note telling the a
 **Any other agent** (Codex, Cursor, Aider, your own scripts):
 
 ```bash
-git clone https://github.com/QDinvest/codemap
+git clone https://github.com/QDinvest/Code-Map-QD codemap
 cd your-project
 python /path/to/codemap/scripts/codemap.py init --write
 ```
