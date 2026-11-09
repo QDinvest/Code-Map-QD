@@ -1,9 +1,6 @@
-<p align="center"><img src=".claude-plugin/icon.png" width="96" alt="codemap icon"></p>
+<h1 align="center"><img src="assets/hero.png" alt="codemap: find the right code in one call, not twenty. 91% fewer tokens, 1 call for file, lines, callers and tests, about 0.3 seconds per lookup, nothing to install"></h1>
 
-<h1 align="center">codemap</h1>
-
-<p align="center"><b>Find the right code in one call, not twenty.</b><br>
-A code map for AI coding agents. One call gives the file to edit with line ranges, who calls it, which tests cover it, and how far to trust the answer.</p>
+<p align="center">A code map for AI coding agents. One call gives the file to edit with line ranges, who calls it, which tests cover it, and how far to trust the answer.</p>
 
 <p align="center">
 <img alt="91% fewer tokens" src="https://img.shields.io/badge/tokens-91%25%20fewer-58a6ff">
